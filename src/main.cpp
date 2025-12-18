@@ -25,8 +25,14 @@
 #define VS1053_DREQ 15
 
 // nom et mot de passe de votre réseau:
-const char *ssid = "lily";
-const char *password = "2301605160";
+const char *ssid = "octavia";
+const char *password = "12341234";
+
+const char* mqtt_server = "test.mosquitto.org";
+unsigned long lastMsg = 0;
+int value = 0;
+#define MSG_BUFFER_SIZE	(50)
+char msg[MSG_BUFFER_SIZE];
 
 #define BUFFSIZE 64  //32, 64 ou 128
 uint8_t mp3buff[BUFFSIZE];
@@ -39,7 +45,8 @@ int chaine = 0; //station actuellement sélectionnée
 
 uint8_t spatial_level = 0;
 WiFiManager wm;
-WiFiClient client;
+WiFiClient wifi_client;
+PubSubClient mqtt_client(wifi_client);
 
 VS1053 player(VS1053_CS, VS1053_DCS, VS1053_DREQ);
 ESP32_VS1053_Stream player_stream;
@@ -65,11 +72,81 @@ void connexionChaine (uint8_t chaine) {
   player_stream.connecttohost(chaines[chaine]);
 }
 
+void setup_wifi() {
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  randomSeed(micros());
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+
+  // Switch on the LED if an 1 was received as first character
+  if ((char)payload[0] == '1') {
+    digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
+    // but actually the LED is on; this is because
+    // it is active low on the ESP-01)
+  } else {
+    digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
+  }
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!wifi_client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random client ID
+    String clientId = "ESP8266Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (mqtt_client.connect(clientId.c_str())) {
+      Serial.println("connected");
+      // Once connected, publish an announcement...
+      mqtt_client.publish("webradio/outTopic", "hello world");
+      // ... and resubscribe
+      mqtt_client.subscribe("webradio/inTopic");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(mqtt_client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
 void setup() {
   WiFi.mode(WIFI_STA);
   SPI.setHwCs(true);
   SPI.begin(SPI_CLK_PIN, SPI_MISO_PIN, SPI_MOSI_PIN);
   Serial.begin(115200);
+
+  setup_wifi();
+  mqtt_client.setServer(mqtt_server, 1883);
+  mqtt_client.setCallback(callback);
 
   bool c = player_stream.startDecoder(VS1053_CS, VS1053_DCS, VS1053_DREQ);
   bool ic = player_stream.isChipConnected();
@@ -118,6 +195,21 @@ void setup() {
 }
 
 void loop() {
+  if (!mqtt_client.connected()) {
+    reconnect();
+  }
+  mqtt_client.loop();
+
+  unsigned long now = millis();
+  if (now - lastMsg > 2000) {
+    lastMsg = now;
+    ++value;
+    snprintf (msg, MSG_BUFFER_SIZE, "hello world #%d", value);
+    Serial.print("Publish message: ");
+    Serial.println(msg);
+    mqtt_client.publish("webradio/outTopic", msg);
+  }
+
   player_stream.loop();
   delay(5);
 
@@ -127,7 +219,7 @@ void loop() {
     // n: prochaine chaine
     if (c == 'n') {
       Serial.println("Chaine suivante");
-      client.stop();
+      wifi_client.stop();
       if (chaine < (NOMBRECHAINES - 1)) {
         chaine++;
       }
@@ -139,7 +231,7 @@ void loop() {
 
     if (c == 'v') {
       Serial.println("Chaine précédente");
-      client.stop();
+      wifi_client.stop();
       if (chaine > 0) {
         chaine--;
       }
