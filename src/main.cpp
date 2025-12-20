@@ -1,4 +1,4 @@
- /*******************************************************************
+/*******************************************************************
 
   Web radio simple à base d'ESP32 et VS1053
 
@@ -16,6 +16,8 @@
 #include <ESP32_VS1053_Stream.h>
 #include <PubSubClient.h>
 
+#include "mqtt.h"
+
 #define SPI_CLK_PIN 5
 #define SPI_MISO_PIN 19
 #define SPI_MOSI_PIN 18
@@ -24,15 +26,15 @@
 #define VS1053_DCS 33
 #define VS1053_DREQ 15
 
+#define NOMBRECHAINES 8 // nombre de chaînes prédéfinies
+
 // nom et mot de passe de votre réseau:
 const char *ssid = "octavia";
 const char *password = "12341234";
 
-const char* mqtt_server = "test.mosquitto.org";
+char msg[MQTT_MSG_BUFFER_SIZE];
 unsigned long lastMsg = 0;
 int value = 0;
-#define MSG_BUFFER_SIZE	(50)
-char msg[MSG_BUFFER_SIZE];
 
 #define BUFFSIZE 64  //32, 64 ou 128
 uint8_t mp3buff[BUFFSIZE];
@@ -40,13 +42,12 @@ uint8_t mp3buff[BUFFSIZE];
 int volume = 85;  // volume sonore 0 à 100
 uint8_t tonalite[4] = {0, 1, 0, 15};
 
-#define NOMBRECHAINES 8 // nombre de chaînes prédéfinies
 int chaine = 0; //station actuellement sélectionnée
 
 uint8_t spatial_level = 0;
 WiFiManager wm;
 WiFiClient wifi_client;
-PubSubClient mqtt_client(wifi_client);
+PubSubClient mqtt_client = mqtt::get_client(wifi_client);
 
 VS1053 player(VS1053_CS, VS1053_DCS, VS1053_DREQ);
 ESP32_VS1053_Stream player_stream;
@@ -69,8 +70,113 @@ void connexionChaine (uint8_t chaine) {
   player_stream.stopSong();
   Serial.print("Demande du stream: ");
   Serial.println(chaines[chaine]);
+
+  snprintf(msg, MQTT_MSG_BUFFER_SIZE, "Changement de chaine radio: %s", chaines[chaine]);
+  mqtt::publish(mqtt_client, "webradio/inTopic", msg);
   player_stream.connecttohost(chaines[chaine]);
 }
+
+void handleCommand(const char cmd) {
+  // n: prochaine chaine
+  if (cmd == 'n') {
+    Serial.println("Chaine suivante");
+    if (chaine < (NOMBRECHAINES - 1)) {
+      chaine++;
+    }
+    else { // retour au début de la liste
+      chaine = 0;
+    }
+    connexionChaine(chaine);
+  }
+
+  if (cmd == 'v') {
+    Serial.println("Chaine précédente");
+    if (chaine > 0) {
+      chaine--;
+    }
+    else {
+      chaine = (NOMBRECHAINES - 1);
+    }
+    connexionChaine(chaine);
+  }
+
+  // +: augmenter le volume
+  if (cmd == '+') {
+    if (volume < 100) {
+      Serial.println("Plus fort");
+      volume++;
+      player.setVolume(volume);
+    }
+  }
+
+  // -: diminuer le volume
+  if (cmd == '-') {
+    if (volume > 0) {
+      Serial.println("Moins fort");
+      volume--;
+      player.setVolume(volume);
+    }
+  }
+
+  if (cmd == 'g') {
+    if (tonalite[2] < 15) {
+      tonalite[2]++;
+      Serial.print("Bass + (");
+      Serial.print(tonalite[2]);
+      Serial.println(")");
+      player.setTone(tonalite);
+    }
+  }
+
+  if (cmd == 'f') {
+    if (tonalite[2] > 0) {
+      tonalite[2]--;
+      Serial.print("Bass - (");
+      Serial.print(tonalite[2]);
+      Serial.println(")");
+      player.setTone(tonalite);
+    }
+  }
+  if (cmd == 'j') {
+    if (tonalite[0] < 15) {
+      tonalite[0]++;
+      Serial.print("Treble + (");
+      Serial.print(tonalite[0]);
+      Serial.println(")");
+      player.setTone(tonalite);
+    }
+  }
+
+  if (cmd == 'h') {
+    if (tonalite[0] > 0) {
+      tonalite[0]--;
+      Serial.print("Treble - (");
+      Serial.print(tonalite[0]);
+      Serial.println(")");
+      player.setTone(tonalite);
+    }
+  }
+
+  if (cmd == 'd') {
+    tonalite[0] = 0;
+    tonalite[2] = 0;
+    player.setTone(tonalite);
+    Serial.println("Tonalité par défaut");
+  }
+}
+
+
+void msg_callback(const char * topic, const byte * payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print(static_cast<char>(payload[i]));
+    handleCommand(static_cast<char>(payload[i]));
+  }
+  Serial.println();
+}
+
 
 void setup_wifi() {
   delay(10);
@@ -95,49 +201,6 @@ void setup_wifi() {
   Serial.println(WiFi.localIP());
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-
-  // Switch on the LED if an 1 was received as first character
-  if ((char)payload[0] == '1') {
-    digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
-    // but actually the LED is on; this is because
-    // it is active low on the ESP-01)
-  } else {
-    digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
-  }
-}
-
-void reconnect() {
-  // Loop until we're reconnected
-  while (!wifi_client.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Create a random client ID
-    String clientId = "ESP8266Client-";
-    clientId += String(random(0xffff), HEX);
-    // Attempt to connect
-    if (mqtt_client.connect(clientId.c_str())) {
-      Serial.println("connected");
-      // Once connected, publish an announcement...
-      mqtt_client.publish("webradio/outTopic", "hello world");
-      // ... and resubscribe
-      mqtt_client.subscribe("webradio/inTopic");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(mqtt_client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
-
 void setup() {
   WiFi.mode(WIFI_STA);
   SPI.setHwCs(true);
@@ -145,8 +208,7 @@ void setup() {
   Serial.begin(115200);
 
   setup_wifi();
-  mqtt_client.setServer(mqtt_server, 1883);
-  mqtt_client.setCallback(callback);
+  mqtt::setup(mqtt_client, msg_callback);
 
   bool c = player_stream.startDecoder(VS1053_CS, VS1053_DCS, VS1053_DREQ);
   bool ic = player_stream.isChipConnected();
@@ -192,11 +254,12 @@ void setup() {
   player.setVolume(volume);
 
   connexionChaine(chaine);
+
 }
 
 void loop() {
   if (!mqtt_client.connected()) {
-    reconnect();
+    mqtt::reconnect(mqtt_client);
   }
   mqtt_client.loop();
 
@@ -204,10 +267,8 @@ void loop() {
   if (now - lastMsg > 2000) {
     lastMsg = now;
     ++value;
-    snprintf (msg, MSG_BUFFER_SIZE, "hello world #%d", value);
-    Serial.print("Publish message: ");
-    Serial.println(msg);
-    mqtt_client.publish("webradio/outTopic", msg);
+    snprintf(msg, MQTT_MSG_BUFFER_SIZE, "hello world #%d", value);
+    mqtt::publish(mqtt_client, "webradio/outTopic", msg);
   }
 
   player_stream.loop();
@@ -215,108 +276,7 @@ void loop() {
 
   if (Serial.available()) {
     const char c = Serial.read();
-
-    // n: prochaine chaine
-    if (c == 'n') {
-      Serial.println("Chaine suivante");
-      wifi_client.stop();
-      if (chaine < (NOMBRECHAINES - 1)) {
-        chaine++;
-      }
-      else { // retour au début de la liste
-        chaine = 0;
-      }
-      connexionChaine(chaine);
-    }
-
-    if (c == 'v') {
-      Serial.println("Chaine précédente");
-      wifi_client.stop();
-      if (chaine > 0) {
-        chaine--;
-      }
-      else {
-        chaine = (NOMBRECHAINES - 1);
-      }
-      connexionChaine(chaine);
-    }
-
-    // +: augmenter le volume
-    if (c == '+') {
-      if (volume < 100) {
-        Serial.println("Plus fort");
-        volume++;
-        player.setVolume(volume);
-      }
-    }
-
-    // -: diminuer le volume
-    if (c == '-') {
-      if (volume > 0) {
-        Serial.println("Moins fort");
-        volume--;
-        player.setVolume(volume);
-      }
-    }
-
-    if (c == 'g') {
-      if (tonalite[2] < 15) {
-        tonalite[2]++;
-        Serial.print("Bass + (");
-        Serial.print(tonalite[2]);
-        Serial.println(")");
-        player.setTone(tonalite);
-      }
-    }
-
-    if (c == 'f') {
-      if (tonalite[2] > 0) {
-        tonalite[2]--;
-        Serial.print("Bass - (");
-        Serial.print(tonalite[2]);
-        Serial.println(")");
-        player.setTone(tonalite);
-      }
-    }
-    if (c == 'j') {
-      if (tonalite[0] < 15) {
-        tonalite[0]++;
-        Serial.print("Treble + (");
-        Serial.print(tonalite[0]);
-        Serial.println(")");
-        player.setTone(tonalite);
-      }
-    }
-
-    if (c == 'h') {
-      if (tonalite[0] > 0) {
-        tonalite[0]--;
-        Serial.print("Treble - (");
-        Serial.print(tonalite[0]);
-        Serial.println(")");
-        player.setTone(tonalite);
-      }
-    }
-
-    if (c == 'd') {
-      tonalite[0] = 0;
-      tonalite[2] = 0;
-      player.setTone(tonalite);
-      Serial.println("Tonalité par défaut");
-    }
-
-    // if (c == 's') {
-    //   spatial_level = (spatial_level + 1) % 4;
-    //   player_stream.setSpatial(spatial_level);
-    //   Serial.print("Spatialisation : ");
-    //   Serial.println(spatial_level);
-    // }
+    handleCommand(c);
   }
 
-  // if (client.available() > 0) {
-  //   uint8_t bytesread = client.read(mp3buff, BUFFSIZE);
-  //   if (bytesread) {
-  //     player_stream.playChunk(mp3buff, bytesread);
-  //   }
-  // }
 }
